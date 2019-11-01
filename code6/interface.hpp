@@ -1,7 +1,7 @@
 #ifndef __INTERFACE_HPP__
 #define __INTERFACE_HPP__
 
-// 包含 asio 和 msgpack 的头文件
+// 与 asio 和 msgpack 相关的头文件
 #include<boost/asio/io_service.hpp>
 #include<boost/asio/ip/tcp.hpp>
 #include<boost/bind.hpp>
@@ -41,10 +41,10 @@ public:
     client(boost::asio::io_service& io_service, tcp::endpoint& endpoint)
         : io_service_(io_service), socket_(io_service), endpoint_(endpoint)
     {
-        buffer = std::make_shared<std::array<char, MAXPACKSIZE>>();
+        buffer = std::make_shared<std::array<char, MAXPACKSIZE>>(); // 初始化 buffer
         result = 0;
     }
-    int add(int a,int b)
+    int add(int a,int b) // 调用 add 和调用 start 的区别在于少传入一个代表函数映射的参数 opt
     {
         return start(ADD,a,b);
     }
@@ -60,18 +60,18 @@ public:
     {
         return start(DIV, a, b);
     }
-    int start(int opt, int a, int b) {
+    int start(int opt, int a, int b) { // 开始 RPC
         boost::system::error_code ec;
-        socket_.connect(endpoint_, ec);
+        socket_.connect(endpoint_, ec); // 连接服务器
         if (!ec)
         {
             static tcp::no_delay option(true);
-            socket_.set_option(option);
+            socket_.set_option(option); // 设置 socket 为无延时 socket
 
-            construct_rpc_data(opt, a , b);
-            send_recive_rpc_data(ec);
+            construct_rpc_data(opt, a , b); // 构造 RPC 包，并将包存入 buffer 成员变量中
+            send_recive_rpc_data(ec); // 发送需求包，并且接受客户端的结果
             std::cout << "send_recive_rpc_data返回值：" << result << std::endl;
-            return result;
+            return result; // 将结果返回
         }
 
         else
@@ -84,20 +84,19 @@ public:
 private:
     void construct_rpc_data(size_t opt, int a, int b)
     {
-        std::cout<< " opt " << opt << std::endl;
+        std::cout<< " opt " << opt << std::endl; // 根据协议首先需要传输的是函数映射
         size_t opt_bigend = boost::asio::detail::socket_ops::host_to_network_long(opt);
-        memcpy(buffer->data(), &opt_bigend, 4);
+        memcpy(buffer->data(), &opt_bigend, 4); // 将函数映射存储在 buffer 的最前面
 
-//#define protocol_to_client std::tuple<int>
-        std::tuple<int, int>  src(a,b);
+        std::tuple<int, int>  src(a,b); // 将需要发送给服务端的参数封装在 truple 里面
         std::stringstream sbuffer;
-        msgpack::pack(sbuffer, src);
-        std::string strbuf(sbuffer.str());
+        msgpack::pack(sbuffer, src); // 序列化
+        std::string strbuf(sbuffer.str()); // 转化为 std::string 类型方便传输
 
         std::cout << " len " << strbuf.size() << std::endl;
         size_t len_bigend = boost::asio::detail::socket_ops::host_to_network_long(strbuf.size());
-        memcpy(buffer->data()+4, &len_bigend, 4);
-        memcpy(buffer->data() + 8, strbuf.data(), strbuf.size());
+        memcpy(buffer->data()+4, &len_bigend, 4); // 将 msgpack 包长度写到函数映射之后
+        memcpy(buffer->data() + 8, strbuf.data(), strbuf.size()); // 将 msgpack 包写入 buffer
     }
     void send_recive_rpc_data(const boost::system::error_code& error) {
 
@@ -105,10 +104,10 @@ private:
         auto async_buffer = buffer;
 
 
-        boost::asio::async_write(socket_, boost::asio::buffer(*async_buffer, MAXPACKSIZE),
+        boost::asio::async_write(socket_, boost::asio::buffer(*async_buffer, MAXPACKSIZE), // 异步将信息发送给服务端
             [this,self, async_buffer](const boost::system::error_code& ec, std::size_t size)
             {
-                recive_rpc_data(ec);
+                recive_rpc_data(ec);  // 当执行这一句的时候，数据以及发送给服务端了，调用本函数来接受服务端的数据
 
                 io_service_.stop();
             });
@@ -121,13 +120,13 @@ private:
         auto self = this->shared_from_this();
         auto async_buffer = buffer;
 
-        boost::asio::async_read(socket_, boost::asio::buffer(*async_buffer, async_buffer->size()),
+        boost::asio::async_read(socket_, boost::asio::buffer(*async_buffer, async_buffer->size()),// 异步读取数据
             [this, self, async_buffer](const boost::system::error_code& ec, std::size_t size)
             {
 
                 std::cout << "数据读取完成" << std::endl;
                 handle_rpc_data(ec);
-                io_service_.stop();
+                io_service_.stop(); // 手动停止事件循环
 
             });
         io_service_.run();
@@ -141,7 +140,7 @@ private:
         msgpack::object_handle  msg = msgpack::unpack(buffer->data(), buffer->size());
         auto tp = msg.get().as<std::tuple<int>>();
         std::cout << " magpack " << std::get<0>(tp) << std::endl;
-        result = std::get<0>(tp);
+        result = std::get<0>(tp); // 将结果写入成员变量 result 里面
     }
 
 private:
@@ -160,7 +159,7 @@ class session
 public:
     session(boost::asio::io_service &io_service) : io_service_(io_service),socket_(io_service)
     {
-        buffer = std::make_shared<std::array<char, MAXPACKSIZE>>();
+        buffer = std::make_shared<std::array<char, MAXPACKSIZE>>(); // 初始化 buffer
         *len_ = '\0';
         *opt_ = '\0';
 
@@ -168,9 +167,9 @@ public:
 
     void start() {
 
-        static tcp::no_delay option(true);
+        static tcp::no_delay option(true); // 设置 socket 为无时延模式
         socket_.set_option(option);
-        start_chains();
+        start_chains(); // 开始 读函数映射 -> 读 msgpack 长度 -> 读 msgpack -> 读函数映射 的循环
 
     }
 
@@ -183,7 +182,7 @@ private:
     {
         read_opt();
     }
-    void read_opt()
+    void read_opt() // 读函数映射
     {
         auto self = this->shared_from_this();
         auto async_buffer = buffer;
@@ -201,11 +200,10 @@ private:
 
                 read_msgpack_len();
             });
-        //io_service_.run();
 
     }
 
-    void read_msgpack_len()
+    void read_msgpack_len() // 读 msgpack 长度
     {
         auto self = this->shared_from_this();
         auto async_buffer = buffer;
@@ -228,7 +226,7 @@ private:
 
     }
 
-    void read_msgpack()
+    void read_msgpack() // 读 msgpack 包
     {
         auto self = this->shared_from_this();
         auto async_buffer = buffer;
@@ -254,7 +252,7 @@ private:
         //io_service_.run();
     }
 
-    void rpc_caculate_return()
+    void rpc_caculate_return() // 将计算结果返回
     {
         std::cout << "进入rpc_caculate_return" << std::endl;
         auto tp = msg.get().as<std::tuple<int, int> >();
@@ -331,8 +329,8 @@ public:
         : io_service_(io_service), acceptor_(io_service, endpoint)
     {
         session_ptr new_session(new session(io_service_));
-        acceptor_.async_accept(new_session->socket(),
-            boost::bind(&server::handle_accept,
+        acceptor_.async_accept(new_session->socket(), // 异步接受连接
+            boost::bind(&server::handle_accept, // 若有连接进入就调用成员函数 handle_accept()
                 this,
                 new_session,
                 boost::asio::placeholders::error));
@@ -343,12 +341,11 @@ public:
             return;
         }
 
-        new_session->start();
-        //io_service_.restart();
+        new_session->start(); // 处理本次连接
 
-        new_session.reset(new session(io_service_));
+        new_session.reset(new session(io_service_)); // 重置 io_service
         acceptor_.async_accept(new_session->socket(), boost::bind(&server::handle_accept, this, new_session,
-            boost::asio::placeholders::error));
+            boost::asio::placeholders::error)); // 异步接受连接
 
         io_service_.run();
     }
