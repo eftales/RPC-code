@@ -1,119 +1,133 @@
-#include <string>
-#include <iostream>
-#include <boost/asio.hpp>
-using boost::asio::ip::tcp;
+#include<boost/asio/io_service.hpp>
+#include<boost/asio/ip/tcp.hpp>
+#include<boost/bind.hpp>
+#include<boost/shared_ptr.hpp>
+#include<boost/enable_shared_from_this.hpp>
 
+#include<boost/asio/streambuf.hpp>
+
+#include<boost/asio/placeholders.hpp>
+#include<boost/asio.hpp>
+using boost::asio::ip::tcp;
+using boost::asio::ip::address;
 #include <msgpack.hpp>
 
-class test_client
-{
+
+#define NOTAPPLICATED -3000
+#define MAXPACKSIZE 1024
+
+#include<string>
+#include<iostream>
+
+class client : public boost::enable_shared_from_this<client> {
 public:
-    test_client(const test_client&) = delete;
-    test_client& operator=(const test_client&) = delete;
-    test_client(boost::asio::io_service& io_service)
-        : io_service_(io_service),
-        socket_(io_service) {}
-
-    //根据 IP 和端口连接服务器
-    void connect(const std::string& addr, const std::string& port) {
-        tcp::resolver resolver(io_service_);
-        tcp::resolver::query query(tcp::v4(), addr, port);
-        tcp::resolver::iterator endpoint_iterator = resolver.resolve(query);
-
-        boost::asio::connect(socket_, endpoint_iterator);
+    client(boost::asio::io_service& io_service, tcp::endpoint& endpoint)
+        : io_service_(io_service), socket_(io_service), endpoint_(endpoint)
+    {
+        buffer = std::make_shared<std::array<char, MAXPACKSIZE>>();
+        result = 0;
     }
 
-    //发起 RPC 调用
-    void call(const char* data, size_t size) {
-        //发送 rpc 请求
-        bool r = send(data, size);
-        if (!r) {
-            throw std::runtime_error("call failed");
+    int start(int a, int b) {
+        boost::system::error_code ec;
+        socket_.connect(endpoint_, ec);
+        if (!ec)
+        {
+            static tcp::no_delay option(true);
+            socket_.set_option(option);
+
+            construct_rpc_data( a , b);
+            send_recive_rpc_data(ec);
+            std::cout << "send_recive_rpc_data返回值：" << result << std::endl;
+            return result;
         }
 
-        //读来自服务器返回的内容
-        read_head();
-    }
-
-    void call(std::string content) {
-        return call(content.data(), content.size());
+        else
+        {
+            std::cerr << boost::system::system_error(ec).what() << std::endl;
+        }
+        return NOTAPPLICATED;
     }
 
 private:
-    std::vector<char> data_;
+    void construct_rpc_data(int a, int b)
+    {
+
+//#define protocol_to_client std::tuple<int>
+        std::tuple<int, int>  src(1,2);
+        std::stringstream sbuffer;
+        msgpack::pack(sbuffer, src);
+        std::string strbuf(sbuffer.str());
+
+        std::cout << " len " << strbuf.size() << std::endl;
+        size_t len_bigend = boost::asio::detail::socket_ops::host_to_network_long(strbuf.size());
+        memcpy(buffer->data(), &len_bigend, 4);
+        memcpy(buffer->data() + 4, strbuf.data(), strbuf.size());
+    }
+    void send_recive_rpc_data(const boost::system::error_code& error) {
+
+        auto self = this->shared_from_this();
+        auto async_buffer = buffer;
+
+
+        boost::asio::async_write(socket_, boost::asio::buffer(*async_buffer, MAXPACKSIZE),
+            [this,self, async_buffer](const boost::system::error_code& ec, std::size_t size)
+            {
+                recive_rpc_data(ec);
+
+                io_service_.stop();
+            });
+        io_service_.run();
+
+    }
+
+    void recive_rpc_data(const boost::system::error_code& error) {
+        std::cout << "发送完毕，开始接受数据" << std::endl;
+        auto self = this->shared_from_this();
+        auto async_buffer = buffer;
+
+        boost::asio::async_read(socket_, boost::asio::buffer(*async_buffer, async_buffer->size()),
+            [this, self, async_buffer](const boost::system::error_code& ec, std::size_t size)
+            {
+
+                std::cout << "数据读取完成" << std::endl;
+                handle_rpc_data(ec);
+                io_service_.stop();
+
+            });
+        io_service_.run();
+
+
+    }
+
+    void handle_rpc_data(const boost::system::error_code& error) {
+
+        std::cout << "读到数据：" << buffer->data() << std::endl;
+        msgpack::object_handle  msg = msgpack::unpack(buffer->data(), buffer->size());
+        auto tp = msg.get().as<std::tuple<int>>();
+        std::cout << " magpack " << std::get<0>(tp) << std::endl;
+        result = std::get<0>(tp);
+
+    }
+
+private:
     boost::asio::io_service& io_service_;
     tcp::socket socket_;
-    //将请求打包为 msgpack 格式发送到服务器
-    bool send(const char* data, size_t size) {
-        size_t size_bigend = boost::asio::detail::socket_ops::host_to_network_long(size);
-        std::vector<boost::asio::const_buffer> message;
-        message.push_back(boost::asio::buffer(&size_bigend, 4));
-        message.push_back(boost::asio::buffer(data, size));
-        boost::system::error_code ec;
-        boost::asio::write(socket_, message, ec);
-        if (ec) {
-            return false;
-        }
-        else {
-            return true;
-        }
-    }
-    void read_head()
-    {
-        char head_[4];
-
-        boost::asio::read(socket_, boost::asio::buffer(head_, 4));
-
-        const int body_len = *((int*)(head_));
-        if (body_len > 0 && body_len < 1024)
-        {
-            if (data_.size() < body_len)
-            {
-                data_.resize(body_len);
-            }
-            read_body(body_len);
-        }
-
-    }
-    void read_body(std::size_t size)
-    {
-
-        boost::asio::read(socket_, boost::asio::buffer(data_.data(), size));
-        msgpack::object_handle  msg;
-        try {
-            msg = msgpack::unpack(data_.data(), data_.size());
-
-            auto tp = msg.get().as<std::tuple<int, std::string>>();
-            std::cout << "client: " << std::get<0>(tp) << " " << std::get<1>(tp) << " " << std::endl;
-        }
-        catch (const std::exception& e) {
-            std::cout << e.what() << std::endl;
-        }
-    }
-
-
-
+    tcp::endpoint& endpoint_;
+    std::shared_ptr<std::array<char, MAXPACKSIZE>> buffer;
+    int result;
 };
 
-void test() {
-    try {
-        boost::asio::io_service io_service;
-        test_client client(io_service);
-        client.connect("127.0.0.1", "9000");
+typedef boost::shared_ptr<client> client_ptr;
 
-        std::tuple<int, std::string> src(20, "hello tom");
-        std::stringstream buffer;
-        msgpack::pack(buffer, src);
+int main()
+{
+    boost::asio::io_service io_service;
+    tcp::endpoint endpoint(address::from_string("127.0.0.1"), 2019);
 
-        std::string str(buffer.str());
-        client.call(str);
-    }
-    catch (const std::exception& e) {
-        std::cout << e.what() << std::endl;
-    }
-}
+    client_ptr new_session(new client(io_service, endpoint));
+    new_session->start(1,2);
+    io_service.run();
 
-int main() {
-    test();
-    std::cout << "client stoped" << std::endl;
+    return 0;
 }

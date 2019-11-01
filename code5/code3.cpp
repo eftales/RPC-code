@@ -1,160 +1,194 @@
-#include <iostream>
-#include <memory>
-#include <vector>
-#include <thread>
-#include <string>
-#include <chrono>
-#include <boost/asio.hpp>
+#include<string>
+#include<iostream>
+#include<boost/asio/io_service.hpp>
+#include<boost/asio/ip/tcp.hpp>
+#include<boost/bind.hpp>
+#include<boost/shared_ptr.hpp>
+#include<boost/enable_shared_from_this.hpp>
+
+#include<boost/asio/streambuf.hpp>
+
+#include<boost/asio/placeholders.hpp>
+#include<boost/asio.hpp>
+using boost::asio::ip::tcp;
+using boost::asio::ip::address;
 #include <msgpack.hpp>
 
-using boost::asio::ip::tcp;
 
-class connection
-    : public std::enable_shared_from_this<connection>
-{
+#define NOTAPPLICATED -3000
+#define MAXPACKSIZE 1024
+
+
+
+class session
+    :   public boost::enable_shared_from_this<session> {
 public:
-    connection(boost::asio::io_service& ios)
-        : ios_(ios), socket_(ios)
+    session(boost::asio::io_service &io_service) : io_service_(io_service),socket_(io_service)
     {
-        head_[0] = '\0';
-        data_.clear();
+        buffer = std::make_shared<std::array<char, MAXPACKSIZE>>();
+        *len_ = '\0'; // 初始化成员变量
+        *opt_ = '\0';
+
     }
 
-    void start()
-    {
-        read_head();
+    void start() {
+
+        static tcp::no_delay option(true);
+        socket_.set_option(option); // 设置 socket 为无延时模式
+        start_chains(); // 开始 读取头部 -> 读取 msgpack 包 -> 读取头部 的循环
+
     }
 
     tcp::socket& socket() {
         return socket_;
     }
 
-    ~connection() {
-        close();
+private:
+    void start_chains()
+    {
+        read_msgpack_len();
+    }
+
+
+    void read_msgpack_len() // 读取包的长度
+    {
+        auto self = this->shared_from_this();
+        auto async_buffer = buffer;
+
+        boost::asio::async_read(socket_, boost::asio::buffer(len_, 4),
+            [this, self, async_buffer](const boost::system::error_code& ec, std::size_t size)
+            {
+
+
+                std::cout << socket_.remote_endpoint().address() << ":" << socket_.remote_endpoint().port() << " len 数据接收完成" << std::endl;
+                std::cout << socket_.remote_endpoint().address() << ":" << socket_.remote_endpoint().port() << " 原始数据 " << len_ << std::endl;
+
+                len = boost::asio::detail::socket_ops::network_to_host_long(int(*(int*)len_)); // 转换为主机字节序
+                std::cout << socket_.remote_endpoint().address() << ":" << socket_.remote_endpoint().port() << " len " << opt << std::endl;
+
+                read_msgpack(); // 读取 msgpack 包
+            });
+
+    }
+
+    void read_msgpack()
+    {
+        auto self = this->shared_from_this();
+        auto async_buffer = buffer;
+
+        boost::asio::async_read(socket_, boost::asio::buffer(async_buffer->data(), len),
+            [this, self, async_buffer](const boost::system::error_code& ec, std::size_t size)
+            {
+                if (ec)
+                {
+                    std::cout << ec.message() << std::endl;
+                    return;
+                }
+
+                std::cout << socket_.remote_endpoint().address() << ":" << socket_.remote_endpoint().port() << " magpack 数据接收完成" << std::endl;
+                std::cout << socket_.remote_endpoint().address() << ":" << socket_.remote_endpoint().port() << " 原始数据 " << async_buffer->data() << std::endl;
+
+
+                msg = msgpack::unpack(async_buffer->data(), len); // 反序列化
+
+                send_to_client();
+
+            });
+
+    }
+
+    void send_to_client()
+    {
+        std::cout << "进入 send_to_client" << std::endl;
+        auto tp = msg.get().as<std::tuple<int, int> >();
+        std::cout << socket_.remote_endpoint().address() << ":" << socket_.remote_endpoint().port() << " magpack " << std::get<0>(tp) << " " << std::get<1>(tp) << std::endl;
+
+
+        int result = 23333; // 要发送的数据
+
+        auto self = this->shared_from_this();
+        auto async_buffer = buffer;
+
+        std::tuple<int>  src(result);
+        std::stringstream sbuffer;
+        msgpack::pack(sbuffer, src); // 序列化
+
+        std::string strbuff(sbuffer.str());
+
+        memcpy(async_buffer->data(), strbuff.data(), strbuff.size());
+
+        std::cout << socket_.remote_endpoint().address() << ":" << socket_.remote_endpoint().port() << " 服务端序列化完成" << std::endl;
+        boost::asio::async_write(socket_, boost::asio::buffer(async_buffer->data(), async_buffer->size()),//
+            [this, self, async_buffer](const boost::system::error_code& ec, std::size_t size)
+            {
+                if (ec)
+                {
+                    std::cout << ec.message() << std::endl;
+                    return;
+                }
+                std::cout << socket_.remote_endpoint().address()<< ":" <<socket_.remote_endpoint().port()<<" 服务端发送成功" << std::endl;
+
+            });
+
     }
 
 private:
-    void read_head()
-    {
-        auto self(shared_from_this());
-        boost::asio::async_read(socket_, boost::asio::buffer(head_, 4),
-            [this, self](boost::system::error_code ec, std::size_t length) {
-                if (!ec) {
-                    std::cout <<" length = "<< length << std::endl;
-                    const int body_len = boost::asio::detail::socket_ops::network_to_host_long(*((int*)(head_)));
-                    if (body_len > 0 && body_len < 1024) {
-                        if (data_.size() < body_len) { data_.resize(body_len); }
-                        read_body(body_len);
-
-                        std::tuple<int, std::string> src(10, "hello client");
-                        std::stringstream buffer;
-                        msgpack::pack(buffer, src);
-
-                        std::string str(buffer.str());
-
-                        int size = str.size();
-                        const char* content = str.data();
-                        std::vector<boost::asio::const_buffer> message;
-                        message.push_back(boost::asio::buffer(&size, 4));
-                        message.push_back(boost::asio::buffer(content,size));
-                        boost::asio::write(self->socket_, message);
-                    }
-                }
-                else {
-                    close();
-                }
-            });
-    }
-
-    void read_body(std::size_t size) {
-        auto self(this->shared_from_this());
-        boost::asio::async_read(
-            socket_, boost::asio::buffer(data_.data(), size),
-            [this, self](boost::system::error_code ec, std::size_t length) {
-                if (!ec) {
-                    msgpack::object_handle  msg;
-                    try {
-                        msg = msgpack::unpack(data_.data(), data_.size());
-
-                        auto tp = msg.get().as<std::tuple<int, std::string>>();
-                        std::cout << "server: " << std::get<0>(tp) << " " << std::get<1>(tp) << " " << std::endl;
-                    }
-                    catch (const std::exception& e) {
-                        std::cout << e.what() << std::endl;
-                        return;
-                    }
-
-                    read_head();
-                }
-                else {
-                    std::cout << ec.message() << std::endl;
-                }
-            });
-    }
-
-    void close() {
-        if (socket_.is_open()) {
-            boost::system::error_code ignored_ec;
-            socket_.shutdown(tcp::socket::shutdown_both, ignored_ec);
-            socket_.close(ignored_ec);
-        }
-    }
-
-    boost::asio::io_service& ios_;
+    boost::asio::io_service& io_service_;
     tcp::socket socket_;
-    char head_[4];
-    std::vector<char> data_;
+    boost::asio::streambuf sbuf_;
+    std::shared_ptr<std::array<char, MAXPACKSIZE>> buffer;
+    char len_[4];
+    int len;
+    char opt_[4];
+    int opt;
+    msgpack::object_handle  msg;
 };
+
+typedef boost::shared_ptr<session> session_ptr;
 
 class server {
 public:
-    server(boost::asio::io_service& ios, short port) : ios_(ios),
-        acceptor_(ios, tcp::endpoint(tcp::v4(), port)) {
-        do_accept();
-    }
-
-    void do_accept()
+    server(boost::asio::io_service& io_service, tcp::endpoint& endpoint)
+        : io_service_(io_service), acceptor_(io_service, endpoint)
     {
-        std::cout << "begin to listen and accept" << std::endl;
-        auto conn = std::make_shared<connection>(ios_);
-        acceptor_.async_accept(conn->socket(), [this, conn](boost::system::error_code ec)
-            {
-                if (ec) {
-                    std::cout << ec.message() << std::endl;
-                }
-                else {
-                    conn->start();
-                    std::cout << "new connection coming" << std::endl;
-                }
-
-                do_accept();
-            });
+        session_ptr new_session(new session(io_service_)); // 指向 session 类
+        acceptor_.async_accept(new_session->socket(), // 异步接收连接，如果有连接就调用 handle_accept() 成员函数
+            boost::bind(&server::handle_accept,
+                this,
+                new_session,
+                boost::asio::placeholders::error));
     }
 
-
-private:
-    boost::asio::io_service& ios_;
-    tcp::acceptor acceptor_;
-    std::vector<std::shared_ptr<tcp::socket>> conns_;
-};
-
-int main() {
-    boost::asio::io_service ios;
-
-    boost::asio::deadline_timer timer(ios);
-    timer.expires_from_now(boost::posix_time::seconds(5));
-    timer.async_wait([&timer, &ios](const boost::system::error_code& ec) {
-        if (ec) {
-            std::cout << ec.message() << std::endl;
+    void handle_accept(session_ptr new_session, const boost::system::error_code& error) {
+        if (error) {
             return;
         }
 
-        ios.stop();
-        std::cout << "server stoped" << std::endl;
-        });
-    server s(ios, 9000);
-    ios.run();
+        new_session->start(); // 调用 session 类的 start() 成员函数
 
+
+        new_session.reset(new session(io_service_));
+        acceptor_.async_accept(new_session->socket(), boost::bind(&server::handle_accept, this, new_session,
+            boost::asio::placeholders::error));
+
+        io_service_.run();
+    }
+
+    void run() {
+        io_service_.run();
+    }
+
+private:
+    boost::asio::io_service& io_service_;
+    tcp::acceptor acceptor_;
+};
+
+int main(int argc, char* argv[])
+{
+    boost::asio::io_service io_service; // 定义 io_service
+    tcp::endpoint endpoint(tcp::v4(), 2019); // 设置协议与端口号
+
+    server s(io_service, endpoint); // 实例化服务器，并开始运行
+    s.run();
     return 0;
 }
-
